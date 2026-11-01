@@ -60,16 +60,22 @@ impl ForeignAppImporter for HeidiSqlImporter {
             if values.contains_key("Folder") {
                 continue;
             }
-            let net_type = values
-                .get("NetType")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-            let Some((driver_label, ssh_tunnel)) = map_net_type(net_type) else {
+            // A path with neither a host nor a network type is not a session
+            // (e.g. a nested sub-key); defaulting it to MySQL would import a
+            // phantom localhost connection.
+            let net_type = values.get("NetType").and_then(|v| v.trim().parse().ok());
+            if net_type.is_none() && value(&values, "Host").is_empty() {
+                log::warn!("HeidiSQL entry \"{path}\" skipped: no host or network type");
+                continue;
+            }
+            let net_type = net_type.unwrap_or(0);
+            let Some((driver_label, ssh_by_default)) = map_net_type(net_type) else {
                 log::warn!(
                     "HeidiSQL session \"{path}\" skipped: unsupported network type {net_type}"
                 );
                 continue;
             };
+            let ssh_tunnel = driver_label != "SQLite" && ssh_tunnel_active(&values, ssh_by_default);
             let conn = parse_session(path, &values, driver_label, ssh_tunnel);
             if let Some(group) = &conn.group_name {
                 if !envelope.group_names.contains(group) {
@@ -106,18 +112,28 @@ fn group_by_session(text: &str) -> BTreeMap<&str, Values<'_>> {
     sessions
 }
 
-/// Driver label and SSH-tunnel flag for the HeidiSQL `NetType` ordinals
+/// Driver label and default SSH-tunnel flag for the HeidiSQL `NetType` ordinals
 /// (`TNetType` in HeidiSQL's `dbstructures.pas`) that Tabularis can open.
+/// The flag only applies when the session has no `SSHtunnelActive` key.
 fn map_net_type(net_type: u32) -> Option<(&'static str, bool)> {
     match net_type {
-        0 | 11 | 16 => Some(("MySQL", false)),
-        2 => Some(("MySQL", true)),
+        0 | 11 => Some(("MySQL", false)),
+        2 | 16 => Some(("MySQL", true)),
         4 => Some(("SQL Server", false)),
         8 => Some(("PostgreSQL", false)),
         9 => Some(("PostgreSQL", true)),
         10 => Some(("SQLite", false)),
         _ => None,
     }
+}
+
+/// HeidiSQL stores an explicit `SSHtunnelActive` flag; older exports only
+/// imply the tunnel through the network type.
+fn ssh_tunnel_active(values: &Values, default: bool) -> bool {
+    values
+        .get("SSHtunnelActive")
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .map_or(default, |active| active != 0)
 }
 
 fn value<'a>(values: &Values<'a>, key: &str) -> &'a str {

@@ -480,6 +480,66 @@ async fn heidisql_imports_ssh_tunnel_settings() {
 }
 
 #[tokio::test]
+async fn heidisql_imports_ssh_for_rds_sessions() {
+    let export = "Servers\\Aurora\\Host<|||>1<|||>aurora.internal\n\
+                  Servers\\Aurora\\NetType<|||>3<|||>16\n\
+                  Servers\\Aurora\\SSHtunnelHost<|||>1<|||>bastion.example.com\n\
+                  Servers\\Aurora\\SSHtunnelUser<|||>1<|||>ec2-user\n";
+    let env = import_heidisql(export, false).await.unwrap();
+
+    let aurora = heidisql_connection(&env, "Aurora");
+    assert_eq!(aurora.driver_label, "MySQL");
+    let ssh = aurora.ssh.as_ref().expect("RDS sessions tunnel by default");
+    assert_eq!(ssh.host, "bastion.example.com");
+    assert_eq!(ssh.username, "ec2-user");
+}
+
+#[tokio::test]
+async fn heidisql_imports_ssh_for_sql_server_when_active() {
+    let export = "Servers\\Billing\\Host<|||>1<|||>10.0.0.8\n\
+                  Servers\\Billing\\NetType<|||>3<|||>4\n\
+                  Servers\\Billing\\SSHtunnelActive<|||>3<|||>1\n\
+                  Servers\\Billing\\SSHtunnelHost<|||>1<|||>jump.example.com\n\
+                  Servers\\Billing\\SSHtunnelHostPort<|||>3<|||>2200\n\
+                  Servers\\Billing\\SSHtunnelUser<|||>1<|||>ops\n";
+    let env = import_heidisql(export, false).await.unwrap();
+
+    let billing = heidisql_connection(&env, "Billing");
+    assert_eq!(billing.driver_label, "SQL Server");
+    let ssh = billing.ssh.as_ref().expect("SSHtunnelActive=1 enables SSH");
+    assert_eq!(ssh.host, "jump.example.com");
+    assert_eq!(ssh.port, Some(2200));
+    assert_eq!(ssh.username, "ops");
+
+    // Without the flag a SQL Server session stays direct.
+    let env = import_heidisql(HEIDISQL_EXPORT, false).await.unwrap();
+    assert!(heidisql_connection(&env, "Reports").ssh.is_none());
+}
+
+#[tokio::test]
+async fn heidisql_honors_ssh_tunnel_active_off_on_tunnel_types() {
+    let export = "Servers\\Jump\\Host<|||>1<|||>10.0.0.5\n\
+                  Servers\\Jump\\NetType<|||>3<|||>2\n\
+                  Servers\\Jump\\SSHtunnelActive<|||>3<|||>0\n\
+                  Servers\\Jump\\SSHtunnelHost<|||>1<|||>10.0.0.1\n";
+    let env = import_heidisql(export, false).await.unwrap();
+
+    assert!(heidisql_connection(&env, "Jump").ssh.is_none());
+}
+
+#[tokio::test]
+async fn heidisql_skips_entries_without_host_or_net_type() {
+    let export = "Servers\\Prod\\Host<|||>1<|||>db.example.com\n\
+                  Servers\\Prod\\NetType<|||>3<|||>0\n\
+                  Servers\\Prod\\Extra\\Comment<|||>1<|||>nested sub-key\n";
+    let env = import_heidisql(export, false).await.unwrap();
+
+    assert_eq!(env.connections.len(), 1);
+    assert_eq!(env.connections[0].name, "Prod");
+    assert_eq!(env.connections[0].host, "db.example.com");
+}
+
+#[tokio::test]
 async fn heidisql_never_imports_passwords() {
     let env = import_heidisql(HEIDISQL_EXPORT, true).await.unwrap();
 
